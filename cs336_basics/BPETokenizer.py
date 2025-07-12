@@ -3,7 +3,7 @@ import re
 import time
 from collections import defaultdict
 
-from typing import BinaryIO
+from typing import BinaryIO, Iterator, Iterable
 
 from multiprocessing import Pool
 
@@ -261,6 +261,105 @@ def serialize_to_file(
             f,
             indent=2  # 可选：美化输出
         )
+
+class BPETokenizer:
+    def __init__(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None
+    ):
+        self.vocab = vocab
+        self.special_token = "<|endoftext|>"
+        self.special_tokens = special_tokens
+        if special_tokens is None:
+            self.special_tokens = [self.special_token]
+        if self.special_token not in self.special_tokens:
+            self.special_tokens.append(self.special_token)
+        
+        self.vocab_index: dict[bytes, int] = {}
+        for index, bs in vocab.items():
+            self.vocab_index[bs] = index
+        
+        self.index_merges: dict[tuple[int, int], int] = {}
+        for i in range(len(merges)):
+            self.index_merges[self.vocab_index[merges[i][0]], self.vocab_index[merges[i][1]]] = i  
+    
+    def _build_chunks(self, text: str, desired_num_chunks: int) -> list[str]:
+        desired_num_chunks = 1
+        chunks = []
+        chunk_size = len(text) // desired_num_chunks
+        chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+        chunk_boundaries[-1] = len(text)
+        mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+        for bi in range(1, len(chunk_boundaries) - 1):
+            initial_position = chunk_boundaries[bi]
+            chunk_text = text[initial_position: initial_position + mini_chunk_size]
+            while True:
+                # Find the special token in the mini chunk
+                found_at = chunk_text.find(self.special_token)
+                if found_at != -1:
+                    chunk_boundaries[bi] = initial_position + found_at
+                    break
+                initial_position += mini_chunk_size
+        
+        for start, end in zip(chunk_boundaries[:-1], chunk_boundaries[1:]):
+            chunks.append(text[start: end])
+        return chunks
+    
+    def encode(self, text: str) -> list[int]:
+        # 1. 将text拆分成chunk（用于多线程处理）
+        chunks = self._build_chunks(text, desired_num_chunks=1)
+        # print(f"chunks: {chunks}")
+        
+        # 2. 将每个chunk内拆分成words, 将word依次映射成list[int]
+        chunk_ids_list = []
+        for chunk in chunks:
+            # 2.1. 找到所有分隔词，先将分割词转换完成
+            sorted_special_tokens = sorted(self.special_tokens, key=len, reverse=True)
+            escaped_tokens = [re.escape(token) for token in sorted_special_tokens]
+            pattern = "(" + "|".join(escaped_tokens) + ")"
+            sentence_list = re.split(pattern, chunk)
+            ids_list = []
+            for sentence in sentence_list:
+                if sentence not in self.special_tokens:
+                    words_list = pretokenize(sentence)
+                    for word in words_list:
+                        token_index_list = [self.vocab_index[bytes([b])] for b in word.encode("utf-8")]
+                        # todo 对token_index_list进行Merge
+                        while True:
+                            min_merge_seq = -1
+                            merge_i = -1
+                            for i in range(len(token_index_list) - 1):
+                                index1, index2 = token_index_list[i], token_index_list[i + 1]
+                                merge_seq = self.index_merges.get((index1, index2), -1)
+                                if merge_seq != -1 and (min_merge_seq == -1 or merge_seq < min_merge_seq):
+                                    merge_i = i
+                                    min_merge_seq = merge_seq
+                            if min_merge_seq == -1:
+                                break
+                            index1, index2 = token_index_list[merge_i], token_index_list[merge_i + 1]
+                            token_index_list[merge_i] = self.vocab_index[self.vocab[index1] + self.vocab[index2]]
+                            del token_index_list[merge_i+1]
+                        
+                        ids_list += token_index_list
+                else:
+                    ids_list.append(self.vocab_index[bytes([c for c in sentence.encode("utf-8")])])
+                    # print(f"special_token: {sentence}")
+            # print(f"ids_list: {ids_list}")
+        return ids_list
+    
+    def decode(self, ids: list[int]) -> str:
+        combined_bytes = b"".join(self.vocab[token_id] for token_id in ids)
+        
+        # 解码并处理非法字符
+        return combined_bytes.decode("utf-8", errors="replace")
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for text in iterable:
+            ids = self.encode(text)
+            for id in ids:
+                yield id
 
 if __name__ == "__main__":
     vocab, merges = train_bpe("dataset/TinyStories-train.txt", 10000, ['<|endoftext|>'], num_process=20)
