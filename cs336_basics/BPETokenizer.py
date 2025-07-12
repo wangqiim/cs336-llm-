@@ -1,8 +1,12 @@
 import os
 import re
+import time
 from collections import defaultdict
 
 from typing import BinaryIO
+
+from multiprocessing import Pool
+
 def find_chunk_boundaries(
     file: BinaryIO, 
     desired_num_chunks: int, 
@@ -57,7 +61,6 @@ def pretokenize(text: str) -> list[str]:
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     return re.findall(PAT, text)
 
-
 def vocab_initialize(
         special_tokens: list[str]
     ) -> tuple[list[bytes], dict[bytes, int]]:
@@ -75,9 +78,8 @@ def vocab_initialize(
         vocab_bytes2index[bytes([c for c in special_token.encode("utf-8")])] = i + init_byte_cnt
     return vocab_index2bytes, vocab_bytes2index
 
-def chunks_read(input_path: str) -> list[str]:
+def chunks_read(input_path: str, num_process: int) -> list[str]:
     chunks = []
-    num_process = 1
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(
             f, num_process, "<|endoftext|>".encode("utf-8"))
@@ -87,23 +89,48 @@ def chunks_read(input_path: str) -> list[str]:
             chunks.append(f.read(end - start).decode("utf-8", errors="ignore"))
     return chunks
 
+class WordCounter:
+    @staticmethod
+    def init(special_tokens: list[str]):
+        escaped_tokens = [re.escape(token) for token in special_tokens]
+        WordCounter.pattern = "|".join(escaped_tokens)
+    
+    @staticmethod
+    def process_chunk(chunk: str) -> dict[str, int]:
+        words_freq = {}
+        texts = re.split(WordCounter.pattern, chunk)
+        for text in texts:
+            for word in pretokenize(text):
+                words_freq[word] = words_freq.get(word, 0) + 1
+        return words_freq
+    
+    @staticmethod
+    def merge_counts(words_freq_list: list[dict[str, int]]) -> dict[str, int]:
+        merged_words_req = {}
+        for words_freq in words_freq_list:
+            for word, freq in words_freq.items():
+                merged_words_req[word] = merged_words_req.get(word, 0) + freq
+        return merged_words_req
+
 def build_words_freqs(
         special_tokens: list[str],
         chunks: list[str],
-        vocab_bytes2index: list[bytes]
+        vocab_bytes2index: list[bytes],
+        num_process: int
     ) -> list[tuple[list[int], int]]:
-    words_freq = {}
-    escaped_tokens = [re.escape(token) for token in special_tokens]
-    pattern = "|".join(escaped_tokens)
-    for chunk in chunks:
-        texts = re.split(pattern, chunk)
-        for text in texts:
-            for word in pretokenize(text):
-                # word = word.replace(" ", "")
-                words_freq[word] = words_freq.get(word, 0) + 1
-                
+    
+    WordCounter.init(special_tokens)
+    start_time = time.time()
+    with Pool(processes=num_process) as pool:  # 显式指定核心数
+        words_freq_list = pool.map(WordCounter.process_chunk, chunks)
+    print(f"[build_words_freqs] map time = {time.time() - start_time:.2f}s")
+    
+    start_time = time.time()
+    reduced_words_freq = WordCounter.merge_counts(words_freq_list)
+    print(f"[build_words_freqs] reduce time = {time.time() - start_time:.2f}s")
+    
     indices_freq_list = []
-    for word, freq in words_freq.items():
+    for word, freq in reduced_words_freq.items():
         token_index_list = [vocab_bytes2index[bytes([b])] for b in word.encode("utf-8")]
         indices_freq_list.append((token_index_list, freq))
     return indices_freq_list
@@ -136,7 +163,6 @@ def merge(indices_freq_list: list[tuple[list[bytes], int]], counts: dict[tuple[i
 
             for new_index1, nex_index2 in zip(indices[:-1], indices[1:]):
                 counts[(new_index1, nex_index2)] += freq
-
         
 def merge_loop(
         vocab_size: int,
@@ -183,25 +209,72 @@ def train_bpe(
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     assert vocab_size > 256 + len(special_tokens), f"vocab_size must greater than {256 + len(special_tokens)}"
-    
+    num_process = kwargs.get("num_process", 1)  # 默认值 1
     # vocabulary initialization
     vocab_index2bytes, vocab_bytes2index = vocab_initialize(special_tokens) 
     merges = []
 
+    import time
     # chunk read
-    chunks = chunks_read(input_path)
+    start_time = time.time()
+    chunks: list[str] = chunks_read(input_path, num_process)
+    print(f"chunk read time = {time.time() - start_time:.2f}s")
     
     # 1. 构建频率表
-    indices_freq_list = build_words_freqs(special_tokens, chunks, vocab_bytes2index)
+    start_time = time.time()
+    indices_freq_list = build_words_freqs(special_tokens, chunks, vocab_bytes2index, num_process)
+    print(f"construct indices frequency list time = {time.time() - start_time:.2f}s")
     
     # 2. vocab
+    start_time = time.time()
     merges = merge_loop(vocab_size, vocab_index2bytes, vocab_bytes2index, indices_freq_list)
+    print(f"merge vocab time = {time.time() - start_time:.2f}s")
     
     vocab = {}
     for i in range(len(vocab_index2bytes)):
         vocab[i] = vocab_index2bytes[i]
     # print(len(vocab))
     return vocab, merges
-            
+
+def serialize_to_file(
+    vocab: dict[int, bytes],
+    merges:list[tuple[bytes, bytes]], 
+    file_path: str
+) -> None:
+    """
+    将 (vocab, merges) 序列化为 JSON 字符串保存到文件
+    Args:
+        vocab_merges: 元组 (vocab_dict, merges_list)
+        file_path: 输出文件路径
+    """
+    import json
+    
+    # 将 bytes 转换为 base64 字符串以便 JSON 序列化
+    vocab_serializable = {k: v.decode('latin1') for k, v in vocab.items()}
+    merges_serializable = [
+        (m[0].decode('latin1'), m[1].decode('latin1')) for m in merges
+    ]
+    
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(
+            {"vocab": vocab_serializable, "merges": merges_serializable},
+            f,
+            indent=2  # 可选：美化输出
+        )
+
 if __name__ == "__main__":
-    train_bpe("/home/wq/workplace/assignment1-basics/tests/fixtures/address.txt", 500, ['<|endoftext|>'])
+    vocab, merges = train_bpe("dataset/TinyStories-train.txt", 10000, ['<|endoftext|>'], num_process=20)
+    serialize_to_file(vocab, merges, "dataset/TinyStories-train-output.txt")
+    # chunk read time = 3.00s
+    # [build_words_freqs] map time = 24.87s
+    # [build_words_freqs] reduce time = 0.06s
+    # construct indices frequency list time = 25.06s
+    # merge vocab time = 141.18s
+
+    # vocab, merges = train_bpe("dataset/TinyStories-valid.txt", 1000, ['<|endoftext|>'], num_process=15)
+    # serialize_to_file(vocab, merges, "dataset/TinyStories-valid-output.txt")
+    # chunkQ read time = 0.04s
+    # [build_words_freqs] map time = 0.25s
+    # [build_words_freqs] reduce time = 0.01s
+    # construct indices frequency list time = 0.27s
+    # merge vocab time = 2.58s
