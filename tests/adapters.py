@@ -588,4 +588,17 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    return train_bpe(input_path, vocab_size, special_tokens)
+    
+    # import cProfile
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+    
+    # import time
+    # start = time.time()
+    rets = train_bpe(input_path, vocab_size, special_tokens)
+    # print(f"elapse time: {time.time() - start}")
+    
+    # profiler.disable()
+    # profiler.print_stats(sort='time')  # 按耗时排序
+    
+    return rets

@@ -58,28 +58,24 @@ def pretokenize(text: str) -> list[str]:
     return re.findall(PAT, text)
 
 
-def train_bpe(
-    input_path: str | os.PathLike,
-    vocab_size: int,
-    special_tokens: list[str], # must distinct, assume special_tokens = 
-    **kwargs,
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    assert vocab_size > 256 + len(special_tokens), f"vocab_size must greater than {256 + len(special_tokens)}"
+def vocab_initialize(
+        special_tokens: list[str]
+    ) -> tuple[list[bytes], dict[bytes, int]]:
     assert len(special_tokens) == 1 and special_tokens[0] == '<|endoftext|>', f"special_tokens must only <|endoftext|>"
     vocab_index2bytes = []
     vocab_bytes2index = {}
-    merges = []
-    # vocabulary initialization
     for i in range(256):
         vocab_index2bytes.append(bytes([i]))
         vocab_bytes2index[bytes([i])] = i
     init_byte_cnt = len(vocab_index2bytes)
-        
+    
     for i in range(len(special_tokens)):
         special_token = special_tokens[i]
         vocab_index2bytes.append(bytes([c for c in special_token.encode("utf-8")]))
         vocab_bytes2index[bytes([c for c in special_token.encode("utf-8")])] = i + init_byte_cnt
+    return vocab_index2bytes, vocab_bytes2index
 
+def chunks_read(input_path: str) -> list[str]:
     chunks = []
     num_process = 1
     with open(input_path, "rb") as f:
@@ -89,8 +85,13 @@ def train_bpe(
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             f.seek(start)
             chunks.append(f.read(end - start).decode("utf-8", errors="ignore"))
-    
-    # 1. 构建频率表
+    return chunks
+
+def build_words_freqs(
+        special_tokens: list[str],
+        chunks: list[str],
+        vocab_bytes2index: list[bytes]
+    ) -> list[tuple[list[int], int]]:
     words_freq = {}
     escaped_tokens = [re.escape(token) for token in special_tokens]
     pattern = "|".join(escaped_tokens)
@@ -105,19 +106,55 @@ def train_bpe(
     for word, freq in words_freq.items():
         token_index_list = [vocab_bytes2index[bytes([b])] for b in word.encode("utf-8")]
         indices_freq_list.append((token_index_list, freq))
-    
-    # 2. merge loop
-    merge_cnt = 0
-    while len(vocab_index2bytes) < vocab_size:
-        counts = defaultdict(int)
-        for indices, freq in indices_freq_list:
-            for index1, index2 in zip(indices[:-1], indices[1:]):
-                counts[(index1, index2)] += freq
-        if len(counts) == 0:
-            break
+    return indices_freq_list
+
+def merge(indices_freq_list: list[tuple[list[bytes], int]], counts: dict[tuple[int], int], index1: int, index2: int, new_index: int):
+    tmp_list = [0] * 10 # pre alloc
+    for indices, freq in indices_freq_list:
+        indices_i = 0
+        i = 0
+        indices_num = len(indices)
+        if len(tmp_list) < indices_num:
+            tmp_list.extend([0] * (indices_num - len(tmp_list)))
+        while i < indices_num:
+            if i + 1 < indices_num and indices[i] == index1 and indices[i + 1] == index2:
+                tmp_list[indices_i] = new_index
+                i += 2
+            else:
+                tmp_list[indices_i] = indices[i]
+                i += 1
+            indices_i += 1
+
+        if i != indices_i:
+            # update count
+            for old_index1, old_index2 in zip(indices[:-1], indices[1:]):
+                counts[(old_index1, old_index2)] -= freq
+                if counts[(old_index1, old_index2)] == 0:
+                    del counts[(old_index1, old_index2)]
+
+            indices[:] = tmp_list[:indices_i]
+
+            for new_index1, nex_index2 in zip(indices[:-1], indices[1:]):
+                counts[(new_index1, nex_index2)] += freq
+
+        
+def merge_loop(
+        vocab_size: int,
+        vocab_index2bytes: list[bytes],
+        vocab_bytes2index: dict[bytes, int],
+        indices_freq_list: list[tuple[list[int], int]]
+    )-> list[tuple[int]]:
+    merges = []
+    counts = defaultdict(int)
+    for i in range(len(indices_freq_list)):
+        indices, freq = indices_freq_list[i]
+        for index1, index2 in zip(indices[:-1], indices[1:]):
+            counts[(index1, index2)] += freq
+    while len(vocab_index2bytes) < vocab_size and len(counts) != 0:
         max_count = 0
         chosen_pair = None
         chosen_bytes_pair = None
+        # find max count merge byte pair
         for pair, count in counts.items():
             if count > max_count:
                 chosen_pair = pair
@@ -128,27 +165,38 @@ def train_bpe(
                 if bytes_pair > chosen_bytes_pair:
                     chosen_pair = pair
                     chosen_bytes_pair = bytes_pair
+        # generate new index
         new_index = len(vocab_index2bytes)
         bytes1, bytes2 = vocab_index2bytes[chosen_pair[0]], vocab_index2bytes[chosen_pair[1]]
         new_bytes = bytes1 + bytes2
         vocab_index2bytes.append(new_bytes)
         vocab_bytes2index[new_bytes] = new_index
-        # print(f"merge_cnt = {merge_cnt} ")
         merges.append((bytes1, bytes2))
         # update indices_freq_list
-        for indices, freq in indices_freq_list:
-            new_indices = []
-            i = 0 
-            while i < len(indices):
-                if i + 1 < len(indices) and indices[i] == chosen_pair[0] and indices[i + 1] == chosen_pair[1]:
-                    new_indices.append(new_index)
-                    i += 2
-                else:
-                    new_indices.append(indices[i])
-                    i += 1
-            indices[:] = new_indices
-        merge_cnt += 1
-        
+        merge(indices_freq_list, counts, chosen_pair[0], chosen_pair[1], new_index)
+    return merges
+   
+def train_bpe(
+    input_path: str | os.PathLike,
+    vocab_size: int,
+    special_tokens: list[str], # must distinct, assume special_tokens = 
+    **kwargs,
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    assert vocab_size > 256 + len(special_tokens), f"vocab_size must greater than {256 + len(special_tokens)}"
+    
+    # vocabulary initialization
+    vocab_index2bytes, vocab_bytes2index = vocab_initialize(special_tokens) 
+    merges = []
+
+    # chunk read
+    chunks = chunks_read(input_path)
+    
+    # 1. 构建频率表
+    indices_freq_list = build_words_freqs(special_tokens, chunks, vocab_bytes2index)
+    
+    # 2. vocab
+    merges = merge_loop(vocab_size, vocab_index2bytes, vocab_bytes2index, indices_freq_list)
+    
     vocab = {}
     for i in range(len(vocab_index2bytes)):
         vocab[i] = vocab_index2bytes[i]
