@@ -285,6 +285,27 @@ class BPETokenizer:
         for i in range(len(merges)):
             self.index_merges[self.vocab_index[merges[i][0]], self.vocab_index[merges[i][1]]] = i  
     
+    @staticmethod
+    def from_files(vocab_merge_filepath, special_tokens=None):
+        """
+        从 JSON 文件中反序列化出 (vocab, merges)
+        Args:
+            file_path: 输入文件路径
+        Returns:
+            元组 (vocab_dict, merges_list)
+        """
+        import json
+        
+        with open(vocab_merge_filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 将 base64 字符串转换回 bytes
+        vocab = {int(k): v.encode('latin1') for k, v in data["vocab"].items()}
+        merges = [
+            (m[0].encode('latin1'), m[1].encode('latin1')) for m in data["merges"]
+        ]
+        return BPETokenizer(vocab, merges, ["<|endoftext|>"])
+        
     def _build_chunks(self, text: str, desired_num_chunks: int) -> list[str]:
         desired_num_chunks = 1
         chunks = []
@@ -361,19 +382,44 @@ class BPETokenizer:
             for id in ids:
                 yield id
 
-if __name__ == "__main__":
-    vocab, merges = train_bpe("dataset/TinyStories-train.txt", 10000, ['<|endoftext|>'], num_process=20)
-    serialize_to_file(vocab, merges, "dataset/TinyStories-train-output.txt")
+########################################################################################
+###########################             test            ################################
+########################################################################################
+
+def train_and_save(train_txt_path, train_output_path):
+    vocab, merges = train_bpe(train_txt_path, 10000, ['<|endoftext|>'], num_process=20)
+    serialize_to_file(vocab, merges, train_output_path)
     # chunk read time = 3.00s
     # [build_words_freqs] map time = 24.87s
     # [build_words_freqs] reduce time = 0.06s
     # construct indices frequency list time = 25.06s
     # merge vocab time = 141.18s
 
-    # vocab, merges = train_bpe("dataset/TinyStories-valid.txt", 1000, ['<|endoftext|>'], num_process=15)
-    # serialize_to_file(vocab, merges, "dataset/TinyStories-valid-output.txt")
-    # chunkQ read time = 0.04s
-    # [build_words_freqs] map time = 0.25s
-    # [build_words_freqs] reduce time = 0.01s
-    # construct indices frequency list time = 0.27s
-    # merge vocab time = 2.58s
+def test_compression(tokenizer, sample_text_path):
+    start_time = time.time()
+    with open(sample_text_path) as f:
+        ids = []
+        for _id in tokenizer.encode_iterable(f):
+            ids.append(_id)
+            
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+    end_time = time.time()
+    
+    print(f"file:{sample_text_path}, size = f{file_size} , token_count = {len(ids)}, compression ratio = {file_size / len(ids):.2f}, throughput = {file_size/(end_time-start_time):.2f}byte/s")
+
+def train_load_test():
+    # train
+    # train_and_save("dataset/TinyStories-train.txt", "dataset/TinyStories-train-output.txt")
+    # load
+    tokenizer = BPETokenizer.from_files("dataset/TinyStories-valid-output.txt")
+    # sample test
+    assert "hello<|endoftext|> world!" == tokenizer.decode(tokenizer.encode("hello<|endoftext|> world!"))
+    # test_compression_ratio
+    test_compression(tokenizer, "tests/fixtures/tinystories_sample_5M.txt")
+    test_compression(tokenizer, "dataset/TinyStories-valid.txt")
+    test_compression(tokenizer, "tests/fixtures/address.txt")
+    test_compression(tokenizer, "tests/fixtures/corpus.en")
+
+if __name__ == "__main__":
+    train_load_test()
