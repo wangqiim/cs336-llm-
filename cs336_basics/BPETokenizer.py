@@ -408,11 +408,9 @@ def test_compression(tokenizer, sample_text_path):
     
     print(f"file:{sample_text_path}, size = f{file_size} , token_count = {len(ids)}, compression ratio = {file_size / len(ids):.2f}, throughput = {file_size/(end_time-start_time):.2f}byte/s")
 
-def train_load_test():
-    # train
-    # train_and_save("dataset/TinyStories-train.txt", "dataset/TinyStories-train-output.txt")
+def load_test(bpe_params_path: str):
     # load
-    tokenizer = BPETokenizer.from_files("dataset/TinyStories-valid-output.txt")
+    tokenizer = BPETokenizer.from_files(bpe_params_path)
     # sample test
     assert "hello<|endoftext|> world!" == tokenizer.decode(tokenizer.encode("hello<|endoftext|> world!"))
     # test_compression_ratio
@@ -422,4 +420,16 @@ def train_load_test():
     test_compression(tokenizer, "tests/fixtures/corpus.en")
 
 if __name__ == "__main__":
-    train_load_test()
+    import argparse
+    parser = argparse.ArgumentParser(description="bpe_tokenizer.")
+    parser.add_argument("--train",  action='store_true', help="训练 tokenizer")
+    parser.add_argument("--train_data_path",  type=str, default="dataset/TinyStories-train.txt", help="训练 tokenizer")
+    parser.add_argument("--train_bpe_param_path",  type=str, default="dataset/TinyStories-train-output.txt", help="训练 tokenizer")
+    parser.add_argument("--eval",  action='store_true', help="评价测试 tokenizer")
+    parser.add_argument("--load_bpe_param_path",  type=str, default="dataset/TinyStories-train-output.txt", help="训练 tokenizer")
+    args = parser.parse_args()
+    args = parser.parse_args()
+    if args.train:
+        train_and_save(args.train_data_path, args.train_bpe_param_path)
+    if args.eval:
+        load_test(args.load_bpe_param_path)

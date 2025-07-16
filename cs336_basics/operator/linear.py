@@ -12,6 +12,8 @@ class Linear(nn.Module):
     self.w = nn.Parameter(
       torch.randn((out_features, in_features), device=device, dtype=dtype)
     )
+    
+    self.init_params(None)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     out = einops.einsum(x, self.w, "... d_in, d_out d_in -> ... d_out")

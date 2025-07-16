@@ -31,7 +31,9 @@ class RoPE(nn.Module):
     x_2 = x[..., 1].clone()
     # print(f"token_positions = f{token_positions}")
     cos_base = self.cos_pos_freq[token_positions][..., :feature_dim//2]
+    cos_base = einops.rearrange(cos_base, "... seq_len half_dk -> ... 1 seq_len half_dk")
     sin_base = self.sin_pos_freq[token_positions][..., :feature_dim//2]
+    sin_base = einops.rearrange(sin_base, "... seq_len half_dk -> ... 1 seq_len half_dk")
     # print(f"x_1.shape = {x_1.shape}")
     # print(f"x_2.shape = {x_2.shape}")
     # print(f"cos_base.shape = {cos_base.shape}")

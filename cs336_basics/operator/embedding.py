@@ -12,6 +12,7 @@ class Embedding(nn.Module):
     self.w = nn.Parameter(
       torch.randn((num_embeddings, embedding_dim), device=device, dtype=dtype)
     )
+    self.init_params(None)
 
   def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
     out = self.w[token_ids]

@@ -12,6 +12,7 @@ class RMSNorm(nn.Module):
     self.g = nn.Parameter(
       torch.randn((self.d_model), device=device, dtype=torch.float32)
     )
+    self.init_params(None)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     result_type = x.dtype

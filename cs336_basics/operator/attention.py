@@ -67,7 +67,7 @@ class MultiHeadAttention(nn.Module):
         token_positions = einops.repeat(token_positions, "seq_len -> b seq_len", b = B)
       Q = self.rope(Q, token_positions)
       K = self.rope(K, token_positions)
-    mask = torch.tril(torch.ones(seq_len, seq_len))
+    mask = torch.tril(torch.ones(seq_len, seq_len)).to(Q.device)
     out = scaled_dot_product_attention(Q, K, V, mask)
     out = einops.rearrange(out, "... num_head seq_len d -> ... seq_len (num_head d)")
     return self.o_proj(out)
@@ -135,7 +135,7 @@ class TransformerLM(nn.Module):
       for _ in range(num_layers)
     )
     self.ln_final = RMSNorm(d_model)
-    self.lm_head = Linear(vocab_size, d_model, device, dtype)
+    self.lm_head = Linear(d_model, vocab_size, device, dtype)
     self.num_layers = num_layers
 
   def forward(self, in_indices: Int[torch.Tensor, " batch_size sequence_length"]) -> torch.Tensor:
