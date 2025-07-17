@@ -84,28 +84,31 @@ def train_loop(
       loss = 0
       for i in range(context_length):
         loss += cross_entropy(logistic[:, i, ...], target[:, i])
+      loss /= context_length
       loss.backward()
       optimizer.step()
       logger.info(f"cur iter {cur_iter}/{step_count}, loss = {loss:3f}")
       if cur_iter % 10 == 0:
         save_checkpoint(net, optimizer, iteration=cur_iter+1, out=checkpoint_save_path)
       if cur_iter % 50 == 0:
-        save_checkpoint(net, optimizer, iteration=cur_iter+1, out=f"{checkpoint_save_path}_{start_iter}")
+        save_checkpoint(net, optimizer, iteration=cur_iter+1, out=f"{checkpoint_save_path}_{cur_iter}")
 
 def generate_np_txt_file(tokenizer: BPETokenizer, raw_txt_path: str, bin_txt_path: str) -> int:
     import numpy as np
     if not os.path.exists(bin_txt_path):
         with open(raw_txt_path) as f:
-            ids = []
+            ids = [0] * (1922767089//3) # pre alloc
+            id_cnt = 0
             for _id in tokenizer.encode_iterable(f):
-                ids.append(_id)
-                if len(ids) % 20000000 == 0:
-                    logger.info(f"cur decode ids {len(ids)}")
+                ids[id_cnt] = _id
+                id_cnt += 1
+                if id_cnt % 100000000 == 0:
+                    logger.info(f"cur decode ids {id_cnt}")
                     
             
-            np_array = np.array(ids, dtype=int)
+            np_array = np.array(ids[:id_cnt], dtype=int)
             np_array.tofile(bin_txt_path)
-            return len(ids)
+            return id_cnt
     else:
         loaded_array = np.fromfile(bin_txt_path, dtype=int)
         return len(loaded_array)

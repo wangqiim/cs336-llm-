@@ -93,7 +93,7 @@ def main():
     parser.add_argument("--num_layers", type=int, default=4, help="transformer block num")
     parser.add_argument("--num_heads", type=int, default=16, help="transformer head num")
     # prompt
-    parser.add_argument("--max_context_length", type=int, default=100, help="transformer head num")
+    parser.add_argument("--max_context_length", type=int, default=256, help="transformer head num")
     # train
     parser.add_argument("--device", type=str, default="cuda:0", help="train device")
     args = parser.parse_args()
@@ -122,11 +122,12 @@ def main():
     inputs: Int[torch.Tensor, "1 seq_length"] = torch.tensor([tokenizer.encode(prompt)], dtype=torch.int32).to(device)
     while inputs.size(-1) < args.max_context_length:
       output: Int[torch.Tensor, "1 seq_length"] = model(inputs)
-      sample_id = sample(output[0,-1], temp=1, top_p=0.9).item()
+      sample_id = sample(output[0,-1], temp=0.9, top_p=0.9).item()
       # print(f"sample id: {sample_id}")
       if sample_id == 256:
         break
       inputs = torch.cat([inputs, torch.tensor([[sample_id]], dtype=torch.int32, device=device)], dim=-1)
+    # print(f"ids len = {inputs.size(-1)}")
     print(f"answer: {tokenizer.decode(inputs[0].tolist())}")
 
 if __name__ == "__main__":
